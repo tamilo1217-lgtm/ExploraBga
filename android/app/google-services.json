@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "750077913236",
+    "project_id": "explorabga-6f391",
+    "storage_bucket": "explorabga-6f391.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:750077913236:android:6efe0fd9e28a05cd3dac81",
+        "android_client_info": {
+          "package_name": "com.yesidmanrique.explorabga"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBN9GG6tIUNb1nSSmZiyKF5V3IcQCXRh5s"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
