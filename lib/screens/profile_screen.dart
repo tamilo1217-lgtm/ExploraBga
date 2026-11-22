@@ -55,20 +55,22 @@ class _ProfileScreenState extends State<ProfileScreen>
     super.build(context);
     return Scaffold(
       backgroundColor: AppTheme.background,
-      body: CustomScrollView(
-        slivers: [
-          _buildSliverHeader(),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
-              child: Column(
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            // ── Información (arriba): quién es el usuario y su resumen ──
+            _buildHeader(),
+            // ── Opciones (abajo, desplazables): zona del pulgar ──
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
                 children: [
-                  const SizedBox(height: 20),
                   _buildStatsRow(),
-                  const SizedBox(height: 28),
+                  const SizedBox(height: 22),
                   _buildAchievements(),
-                  const SizedBox(height: 28),
-                  _buildSection('👤  Mi cuenta', [
+                  const SizedBox(height: 24),
+                  _buildSection('Mi cuenta', [
                     _settingsTile(Icons.edit_rounded, 'Editar perfil',
                         'Nombre, foto y ciudad', onTap: () => _editProfile()),
                     _settingsTile(Icons.lock_outline_rounded, 'Cambiar contraseña',
@@ -77,8 +79,19 @@ class _ProfileScreenState extends State<ProfileScreen>
                     _settingsTile(Icons.location_city_rounded, 'Ciudad',
                         AppState.userCity, onTap: () => _showCityPicker()),
                   ]),
-                  const SizedBox(height: 20),
-                  _buildSection('⚙️  Preferencias', [
+                  const SizedBox(height: 18),
+                  _buildSection('Exploración', [
+                    _settingsTile(Icons.favorite_rounded, 'Mis favoritos',
+                        '${AppState.favorites.length} lugares guardados',
+                        iconColor: AppTheme.error,
+                        onTap: () => _showFavorites()),
+                    _settingsTile(Icons.route_rounded, 'Rutas trazadas',
+                        '${_stats['routesTraced'] ?? 0} rutas · ${(_stats['totalDistanceKm'] ?? 0.0).toStringAsFixed(1)} km',
+                        iconColor: AppTheme.accent,
+                        onTap: () => _showRouteHistory()),
+                  ]),
+                  const SizedBox(height: 18),
+                  _buildSection('Preferencias', [
                     _toggleTile(Icons.notifications_outlined, 'Notificaciones',
                         'Alertas de nuevos lugares',
                         AppState.notificationsEnabled,
@@ -92,189 +105,122 @@ class _ProfileScreenState extends State<ProfileScreen>
                         AppState.showRatings,
                         (v) => setState(() => AppState.showRatings = v)),
                   ]),
-                  const SizedBox(height: 20),
-                  _buildSection('🗺️  Exploración', [
-                    _settingsTile(Icons.favorite_rounded, 'Mis favoritos',
-                        '${AppState.favorites.length} lugares guardados',
-                        iconColor: AppTheme.error,
-                        onTap: () => _showFavorites()),
-                    _settingsTile(Icons.route_rounded, 'Rutas trazadas',
-                        '${_stats['routesTraced'] ?? 0} rutas · ${(_stats['totalDistanceKm'] ?? 0.0).toStringAsFixed(1)} km',
-                        iconColor: AppTheme.accent,
-                        onTap: () => _showRouteHistory()),
-                  ]),
-                  const SizedBox(height: 20),
-                  _buildSection('ℹ️  Aplicación', [
+                  const SizedBox(height: 18),
+                  _buildSection('Aplicación', [
                     _settingsTile(Icons.info_outline_rounded, 'Acerca de',
-                        'Explora BGA v1.0 — 4 estudiantes UTS', onTap: () => _showAbout()),
-                    _settingsTile(Icons.star_rate_rounded, 'Calificar la app',
-                        '¡Déjanos tu opinión en la tienda!',
-                        iconColor: AppTheme.accentGold),
+                        'Explora BGA · Proyecto de grado UTS', onTap: () => _showAbout()),
                     _settingsTile(Icons.bug_report_outlined, 'Reportar un problema',
                         'Ayúdanos a mejorar la app', onTap: () => _showReportDialog()),
                     _settingsTile(Icons.privacy_tip_outlined, 'Política de privacidad',
                         'Cómo usamos tus datos', onTap: () => _showPrivacyPolicy()),
                   ]),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 22),
                   _buildLogoutButton(),
                 ],
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  // ── Sliver header with gradient ────────────────────────
-  Widget _buildSliverHeader() {
-    return SliverToBoxAdapter(
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              AppTheme.surfaceLight,
-              AppTheme.surface,
-            ],
-          ),
-        ),
-        child: SafeArea(
-          bottom: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
-            child: Column(
+  // ── Encabezado: avatar, nombre, correo y ciudad ───────
+  Widget _buildHeader() {
+    final hasPhoto = AppState.userPhotoPath != null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _pickPhoto,
+            child: Stack(
               children: [
-                // Avatar + name
-                Row(
-                  children: [
-                    Stack(
-                      children: [
-                        GestureDetector(
-                          onTap: _pickPhoto,
-                          child: Stack(
-                            children: [
-                              Container(
-                                width: 72,
-                                height: 72,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  gradient: AppState.userPhotoPath == null
-                                    ? const LinearGradient(
-                                        colors: [AppTheme.accent, AppTheme.accentGold],
-                                        begin: Alignment.topLeft,
-                                        end: Alignment.bottomRight,
-                                      )
-                                    : null,
-                                  image: AppState.userPhotoPath != null
-                                    ? DecorationImage(
-                                        image: FileImage(File(AppState.userPhotoPath!)),
-                                        fit: BoxFit.cover,
-                                      )
-                                    : null,
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: AppTheme.accent.withOpacity(0.4),
-                                      blurRadius: 16,
-                                      offset: const Offset(0, 6),
-                                    ),
-                                  ],
-                                ),
-                                child: AppState.userPhotoPath == null
-                                  ? Center(
-                                      child: Text(
-                                        AppState.userName.isNotEmpty
-                                            ? AppState.userName[0].toUpperCase()
-                                            : 'E',
-                                        style: GoogleFonts.poppins(
-                                          color: Colors.white,
-                                          fontSize: 30,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                    )
-                                  : null,
-                              ),
-                              // Ícono de cámara encima
-                              Positioned(
-                                bottom: 0, right: 0,
-                                child: Container(
-                                  width: 24, height: 24,
-                                  decoration: BoxDecoration(
-                                    color: AppTheme.accent,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: AppTheme.surface, width: 2),
-                                  ),
-                                  child: const Icon(Icons.camera_alt_rounded,
-                                      color: Colors.white, size: 12),
-                                ),
-                              ),
-                            ],
+                Container(
+                  width: 76,
+                  height: 76,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: AppTheme.accent,
+                    image: hasPhoto
+                        ? DecorationImage(
+                            image: FileImage(File(AppState.userPhotoPath!)),
+                            fit: BoxFit.cover)
+                        : null,
+                  ),
+                  child: hasPhoto
+                      ? null
+                      : Center(
+                          child: Text(
+                            AppState.userName.isNotEmpty
+                                ? AppState.userName[0].toUpperCase()
+                                : 'E',
+                            style: GoogleFonts.poppins(
+                                color: AppTheme.onAccent,
+                                fontSize: 32,
+                                fontWeight: FontWeight.w700),
                           ),
                         ),
-
-                      ],
+                ),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      color: AppTheme.surfaceLight,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: AppTheme.background, width: 2),
                     ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            AppState.userName,
-                            style: GoogleFonts.poppins(
-                              color: AppTheme.textPrimary,
-                              fontSize: 20,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          Text(
-                            AppState.userEmail,
-                            style: GoogleFonts.poppins(
-                                color: AppTheme.textSecondary, fontSize: 13),
-                          ),
-                          const SizedBox(height: 4),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: AppTheme.accent.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                  color: AppTheme.accent.withOpacity(0.4)),
-                            ),
-                            child: Text(
-                              '📍 ${AppState.userCity}',
-                              style: GoogleFonts.poppins(
-                                  color: AppTheme.accent,
-                                  fontSize: 11.5,
-                                  fontWeight: FontWeight.w500),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    GestureDetector(
-                      onTap: _editProfile,
-                      child: Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: AppTheme.background.withOpacity(0.6),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.white12),
-                        ),
-                        child: const Icon(Icons.edit_rounded,
-                            color: AppTheme.textSecondary, size: 18),
-                      ),
-                    ),
-                  ],
+                    child: const Icon(Icons.camera_alt_rounded,
+                        color: AppTheme.textPrimary, size: 13),
+                  ),
                 ),
               ],
             ),
           ),
-        ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(AppState.userName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                        color: AppTheme.textPrimary,
+                        fontSize: 21,
+                        fontWeight: FontWeight.w700)),
+                Text(AppState.userEmail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                        color: AppTheme.textSecondary, fontSize: 13)),
+                const SizedBox(height: 6),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.place_rounded,
+                          size: 13, color: AppTheme.accent),
+                      const SizedBox(width: 4),
+                      Text(AppState.userCity,
+                          style: GoogleFonts.poppins(
+                              color: AppTheme.textPrimary, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
