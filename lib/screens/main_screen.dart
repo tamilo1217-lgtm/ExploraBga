@@ -71,6 +71,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       height: 72 + MediaQuery.of(context).padding.bottom,
       decoration: BoxDecoration(
         color: AppTheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
         border: Border(top: BorderSide(color: Colors.white.withOpacity(0.07))),
         boxShadow: [
           BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 24, offset: const Offset(0, -4)),
