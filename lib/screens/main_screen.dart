@@ -35,7 +35,9 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _loadUserData() async {
+    await AppState.loadProfile();
     await AppState.loadFavorites();
+    if (mounted) setState(() {});
   }
 
   @override

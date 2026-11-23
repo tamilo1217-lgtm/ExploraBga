@@ -33,6 +33,12 @@ class FirestoreService {
     await _userDoc?.update({'name': name, 'city': city});
   }
 
+  /// Guardar la foto de perfil (imagen pequeña en base64; null = eliminar).
+  /// Se usa Firestore porque Firebase Storage exige el plan Blaze.
+  static Future<void> savePhoto(String? base64Photo) async {
+    await _userDoc?.set({'photoBase64': base64Photo ?? ''}, SetOptions(merge: true));
+  }
+
   // ══════════════════════════════════════════════════════
   // RUTAS TRAZADAS
   // ══════════════════════════════════════════════════════

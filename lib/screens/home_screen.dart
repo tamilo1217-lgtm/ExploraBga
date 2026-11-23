@@ -43,6 +43,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   static final LatLng _bucaCenter = LatLng(7.1193, -73.1227);
 
+  // Máximo de marcadores visibles a la vez (evita llenar el mapa)
+  static const int _maxMarkers = 18;
+  Timer? _moveDebounce;
+
   @override
   void initState() {
     super.initState();
@@ -57,6 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _moveDebounce?.cancel();
     AppState.routeRequest.removeListener(_onRouteRequest);
     _searchCtrl.dispose();
     _mapCtrl.dispose();
@@ -124,19 +129,40 @@ class _HomeScreenState extends State<HomeScreen> {
     return d < 1000 ? '${d.toInt()} m' : '${(d / 1000).toStringAsFixed(1)} km';
   }
 
+  Marker _placeMarker(PlaceModel p, {bool big = false}) {
+    final size = big ? 52.0 : 40.0;
+    return Marker(
+      point: LatLng(p.lat, p.lng),
+      width: size,
+      height: size,
+      alignment: Alignment.topCenter,
+      child: GestureDetector(
+        onTap: () => _showDetail(p),
+        child: Icon(Icons.location_on,
+            color: big ? AppTheme.accent : _catColor(p.category), size: size),
+      ),
+    );
+  }
+
+  /// Con una ruta activa solo se muestra el destino. Sin ruta, se muestran
+  /// los lugares filtrados que están dentro de la pantalla (máx. _maxMarkers),
+  /// los más cercanos al centro; al mover o acercar el mapa se recalculan.
   void _updateMarkers() {
-    setState(() {
-      _markers = _filtered.map((p) => Marker(
-        point: LatLng(p.lat, p.lng),
-        width: 40,
-        height: 40,
-        alignment: Alignment.topCenter,
-        child: GestureDetector(
-          onTap: () => _showDetail(p),
-          child: Icon(Icons.location_on, color: _catColor(p.category), size: 40),
-        ),
-      )).toList();
-    });
+    final dest = _activeRouteDest;
+    if (_polylines.isNotEmpty && dest != null) {
+      setState(() => _markers = [_placeMarker(dest, big: true)]);
+      return;
+    }
+    var list = _filtered;
+    if (_mapReady) {
+      final bounds = _mapCtrl.camera.visibleBounds;
+      final c = _mapCtrl.camera.center;
+      list = list.where((p) => bounds.contains(LatLng(p.lat, p.lng))).toList()
+        ..sort((a, b) => Geolocator.distanceBetween(c.latitude, c.longitude, a.lat, a.lng)
+            .compareTo(Geolocator.distanceBetween(c.latitude, c.longitude, b.lat, b.lng)));
+      if (list.length > _maxMarkers) list = list.take(_maxMarkers).toList();
+    }
+    setState(() => _markers = list.map((p) => _placeMarker(p)).toList());
   }
 
 
@@ -157,12 +183,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Color _catColor(String cat) {
     switch (cat) {
-      case 'Restaurantes': return Colors.redAccent;
-      case 'Parques':      return Colors.green;
-      case 'Cines':        return Colors.blue;
-      case 'Aire Libre':   return Colors.cyan;
-      case 'Diversión':    return Colors.orange;
-      case 'Cultura':      return Colors.purple;
+      case 'Restaurantes':        return Colors.redAccent;
+      case 'Parques':             return Colors.green;
+      case 'Centros comerciales': return Colors.blue;
+      case 'Cultura':             return Colors.purple;
       default:             return Colors.pinkAccent;
     }
   }
@@ -254,26 +278,25 @@ class _HomeScreenState extends State<HomeScreen> {
         distanceKm: double.parse((result.distanceMeters / 1000).toStringAsFixed(2)),
       );
 
-      final newPolylines = <Polyline>[];
-      // Ruta alternativa (gris, detrás)
-      if (result.routes.length > 1) {
-        newPolylines.add(Polyline(
-          points: result.routes[1],
-          color: Colors.blueGrey,
-          strokeWidth: 4,
+      // Ruta con borde blanco y color propio (morado) para que no se
+      // confunda con las calles del mapa.
+      final mainPts = result.routes[0];
+      final newPolylines = <Polyline>[
+        Polyline(
+          points: mainPts,
+          color: Colors.white,
+          strokeWidth: 12,
           strokeCap: StrokeCap.round,
           strokeJoin: StrokeJoin.round,
-        ));
-      }
-      // Ruta principal (naranja, encima: va al final de la lista)
-      final mainPts = result.routes[0];
-      newPolylines.add(Polyline(
-        points: mainPts,
-        color: AppTheme.accent,
-        strokeWidth: 6,
-        strokeCap: StrokeCap.round,
-        strokeJoin: StrokeJoin.round,
-      ));
+        ),
+        Polyline(
+          points: mainPts,
+          color: AppTheme.route,
+          strokeWidth: 7,
+          strokeCap: StrokeCap.round,
+          strokeJoin: StrokeJoin.round,
+        ),
+      ];
 
       setState(() {
         _polylines = newPolylines;
@@ -281,6 +304,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _routeMode = mode;
         _loadingRoute = false;
       });
+      _updateMarkers(); // con ruta activa solo queda el destino
       if (mainPts.isNotEmpty && _mapReady) {
         _mapCtrl.fitCamera(CameraFit.bounds(
           bounds: LatLngBounds.fromPoints([_currentPos!, ...mainPts]),
@@ -341,30 +365,26 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Stack(
         children: [
           _buildMap(),
-          // Top-right floating controls
-          SafeArea(
-            child: Align(
-              alignment: Alignment.topRight,
-              child: Padding(
-                padding: const EdgeInsets.only(top: 16, right: 14),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _fab(Icons.tune_rounded, AppTheme.accent, _showFilters, glow: true),
-                    const SizedBox(height: 10),
-                    _fab(Icons.my_location_rounded, AppTheme.textPrimary, _goToMyLocation),
-                    if (_polylines.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      _fab(Icons.close_rounded, AppTheme.error,
-                          () => _confirmCancelRoute()),
-                    ],
-                  ],
-                ),
-              ),
+          // Botones flotantes a la derecha, a la altura del pulgar
+          Positioned(
+            right: 14,
+            bottom: 132,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_polylines.isNotEmpty) ...[
+                  _fab(Icons.close_rounded, AppTheme.error,
+                      () => _confirmCancelRoute()),
+                  const SizedBox(height: 10),
+                ],
+                _fab(Icons.my_location_rounded, AppTheme.textPrimary, _goToMyLocation),
+                const SizedBox(height: 10),
+                _fab(Icons.tune_rounded, AppTheme.onAccent, _showFilters, glow: true),
+              ],
             ),
           ),
           // Place count badge
-          if (!_loadingLocation)
+          if (!_loadingLocation && _lastRouteResult == null)
             SafeArea(
               child: Align(
                 alignment: Alignment.topLeft,
@@ -379,9 +399,15 @@ class _HomeScreenState extends State<HomeScreen> {
           // Route info card (shown when route is active)
           if (_lastRouteResult != null)
             Positioned(
-              top: 80,
+              top: 0,
               left: 14,
-              child: _buildRouteInfoCard(),
+              right: 14,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: _buildRouteInfoCard(),
+                ),
+              ),
             ),
           // Search bar above chips
           Positioned(
@@ -416,16 +442,38 @@ class _HomeScreenState extends State<HomeScreen> {
         initialZoom: 13.5,
         minZoom: 10,
         maxZoom: 18,
-        onMapReady: () => _mapReady = true,
+        onMapReady: () {
+          _mapReady = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _updateMarkers();
+          });
+        },
+        onPositionChanged: (camera, hasGesture) {
+          _moveDebounce?.cancel();
+          _moveDebounce = Timer(const Duration(milliseconds: 250), () {
+            if (mounted && _polylines.isEmpty) _updateMarkers();
+          });
+        },
         interactionOptions: const InteractionOptions(
           flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
         ),
       ),
       children: [
         TileLayer(
+          // Mosaicos estándar de OpenStreetMap (no requieren llave).
           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          // Identifica la app ante OpenStreetMap (obligatorio). Debe ser el applicationId.
+          // Identifica la app ante OpenStreetMap (obligatorio): applicationId.
           userAgentPackageName: 'com.yesidmanrique.explorabga',
+          // Se desatura el mapa (casi gris) para que la ruta morada resalte.
+          tileBuilder: (context, tileWidget, tile) => ColorFiltered(
+            colorFilter: const ColorFilter.matrix(<double>[
+              0.55, 0.38, 0.07, 0, 18,
+              0.20, 0.73, 0.07, 0, 18,
+              0.20, 0.38, 0.42, 0, 18,
+              0,    0,    0,    1, 0,
+            ]),
+            child: tileWidget,
+          ),
         ),
         PolylineLayer(polylines: _polylines),
         MarkerLayer(markers: _markers),
@@ -610,6 +658,17 @@ class _HomeScreenState extends State<HomeScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (_activeRouteDest != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(_activeRouteDest!.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.poppins(
+                      color: AppTheme.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700)),
+            ),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -626,15 +685,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: GoogleFonts.poppins(color: AppTheme.textPrimary, fontSize: 13, fontWeight: FontWeight.w700)),
                 ],
               ),
-              if (_lastRouteResult!.routes.length > 1) ...[
-                Container(width: 1, height: 28, color: Colors.white12,
-                  margin: const EdgeInsets.symmetric(horizontal: 10)),
-                Column(mainAxisSize: MainAxisSize.min, children: [
-                  Text('Alt.', style: GoogleFonts.poppins(color: Colors.white38, fontSize: 10)),
-                  Container(width: 26, height: 3, decoration: BoxDecoration(
-                    color: Colors.white38, borderRadius: BorderRadius.circular(2))),
-                ]),
-              ],
             ],
           ),
           const SizedBox(height: 8),
@@ -691,6 +741,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 _lastRouteResult = null;
                 _activeRouteDest = null;
               });
+              _updateMarkers();
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppTheme.error,
@@ -819,7 +870,6 @@ class _PlaceDetailSheetState extends State<_PlaceDetailSheet> {
           ),
           const SizedBox(height: 14),
           Wrap(spacing: 8, children: [
-            _chip(Icons.star_rounded, widget.place.rating.toStringAsFixed(1), AppTheme.accentGold),
             _chip(Icons.payments_outlined, widget.place.priceRange, AppTheme.accent),
             if (widget.distance.isNotEmpty)
               _chip(Icons.near_me_outlined, widget.distance, AppTheme.textSecondary),
@@ -918,7 +968,7 @@ class _FilterSheetState extends State<_FilterSheet> {
           const SizedBox(height: 22),
           Text('Precio', style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 13, fontWeight: FontWeight.w500)),
           const SizedBox(height: 10),
-          Wrap(spacing: 8, children: ['Todos', '\$', '\$\$', '\$\$\$', 'Gratis'].map((p) {
+          Wrap(spacing: 8, children: PlaceModel.priceFilters.map((p) {
             final sel = p == _price;
             return GestureDetector(
               onTap: () => setState(() => _price = p),
@@ -942,17 +992,6 @@ class _FilterSheetState extends State<_FilterSheet> {
                 style: GoogleFonts.poppins(color: AppTheme.accent, fontSize: 13, fontWeight: FontWeight.w600)),
           ]),
           _slider(_dist, 500, 60000, 24, AppTheme.accent, (v) => setState(() => _dist = v)),
-          const SizedBox(height: 14),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text('Calificación mínima', style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 13, fontWeight: FontWeight.w500)),
-            Row(children: [
-              const Icon(Icons.star_rounded, color: AppTheme.accentGold, size: 15),
-              const SizedBox(width: 3),
-              Text(_rating == 0 ? 'Todas' : '${_rating.toStringAsFixed(1)}+',
-                  style: GoogleFonts.poppins(color: AppTheme.accentGold, fontSize: 13, fontWeight: FontWeight.w600)),
-            ]),
-          ]),
-          _slider(_rating, 0, 5, 10, AppTheme.accentGold, (v) => setState(() => _rating = v)),
           const SizedBox(height: 24),
           Row(children: [
             Expanded(child: OutlinedButton(

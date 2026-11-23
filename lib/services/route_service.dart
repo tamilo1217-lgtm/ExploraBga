@@ -15,6 +15,7 @@ class RouteResult {
 
   String get durationLabel {
     final min = (durationSeconds / 60).round();
+    if (min < 1) return '< 1 min';
     return min < 60 ? '~$min min' : '~${(min/60).toStringAsFixed(1)} h';
   }
 
@@ -39,7 +40,7 @@ class RouteService {
     final profile = mode == 'walking' ? 'foot' : 'driving';
     final url = Uri.parse(
       '$_baseUrl/$profile/$startLng,$startLat;$endLng,$endLat'
-      '?overview=full&geometries=polyline&alternatives=true',
+      '?overview=full&geometries=polyline&alternatives=false',
     );
 
     print('=== ROUTE [$mode] → $url');
@@ -63,6 +64,7 @@ class RouteService {
     }).toList();
 
     final distanceMeters = (best['distance'] as num).toDouble();
+    print('=== ROUTE RESULT [$mode] distancia=${distanceMeters.round()} m, OSRM=${(best['duration'] as num).round()} s');
 
     // Calculamos el tiempo desde la distancia con velocidades promedio reales:
     // OSRM usa límites de velocidad de vía (50-60 km/h) lo cual no es realista

@@ -285,15 +285,6 @@ class _PlacesScreenState extends State<PlacesScreen>
                               color: AppTheme.textSecondary, fontSize: 12)),
                       const SizedBox(height: 5),
                       Row(children: [
-                        const Icon(Icons.star_rounded,
-                            color: AppTheme.accentGold, size: 12),
-                        const SizedBox(width: 3),
-                        Text(p.rating.toStringAsFixed(1),
-                            style: GoogleFonts.poppins(
-                                color: AppTheme.accentGold,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(width: 8),
                         Text(p.priceRange,
                             style: GoogleFonts.poppins(
                                 color: AppTheme.accent,
@@ -451,8 +442,6 @@ class _QuickDetailSheetState extends State<_QuickDetailSheet> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _stat(Icons.star_rounded, widget.place.rating.toStringAsFixed(1), 'Rating', AppTheme.accentGold),
-                _divider(),
                 _stat(Icons.payments_outlined, widget.place.priceRange, 'Precio', AppTheme.accent),
                 _divider(),
                 _stat(Icons.near_me_outlined, widget.distance.isEmpty ? '—' : widget.distance, 'Distancia', AppTheme.textSecondary),
@@ -548,14 +537,13 @@ class _PlacesFilterSheetState extends State<_PlacesFilterSheet> {
           const SizedBox(height: 20),
           _label('Precio'),
           const SizedBox(height: 8),
-          Wrap(spacing: 8, children: ['Todos', '\$', '\$\$', '\$\$\$', 'Gratis'].map((p) =>
+          Wrap(spacing: 8, children: PlaceModel.priceFilters.map((p) =>
             _chip(p, p == _price, () => setState(() => _price = p))).toList()),
           const SizedBox(height: 20),
           _label('Ordenar por'),
           const SizedBox(height: 8),
           Wrap(spacing: 8, children: [
             _chip('Distancia', _sort == 'distancia', () => setState(() => _sort = 'distancia')),
-            _chip('Calificación', _sort == 'calificacion', () => setState(() => _sort = 'calificacion')),
             _chip('Nombre A-Z', _sort == 'nombre', () => setState(() => _sort = 'nombre')),
           ]),
           const SizedBox(height: 20),
@@ -565,12 +553,6 @@ class _PlacesFilterSheetState extends State<_PlacesFilterSheet> {
                 style: GoogleFonts.poppins(color: AppTheme.accent, fontSize: 13, fontWeight: FontWeight.w600)),
           ]),
           _slider(_dist, 500, AppTheme.accent, (v) => setState(() => _dist = v)),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            _label('Calificación mínima'),
-            Text(_rating == 0 ? 'Todas' : '${_rating.toStringAsFixed(1)}+',
-                style: GoogleFonts.poppins(color: AppTheme.accentGold, fontSize: 13, fontWeight: FontWeight.w600)),
-          ]),
-          _slider(_rating, 0, AppTheme.accentGold, (v) => setState(() => _rating = v), max: 5, div: 10),
           const SizedBox(height: 24),
           Row(children: [
             Expanded(child: OutlinedButton(

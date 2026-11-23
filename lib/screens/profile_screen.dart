@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -127,7 +127,7 @@ class _ProfileScreenState extends State<ProfileScreen>
 
   // ── Encabezado: avatar, nombre, correo y ciudad ───────
   Widget _buildHeader() {
-    final hasPhoto = AppState.userPhotoPath != null;
+    final hasPhoto = AppState.userPhotoBytes != null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
       child: Row(
@@ -144,7 +144,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                     color: AppTheme.accent,
                     image: hasPhoto
                         ? DecorationImage(
-                            image: FileImage(File(AppState.userPhotoPath!)),
+                            image: MemoryImage(AppState.userPhotoBytes!),
                             fit: BoxFit.cover)
                         : null,
                   ),
@@ -636,12 +636,13 @@ class _ProfileScreenState extends State<ProfileScreen>
               Navigator.pop(context);
               await _selectImage(ImageSource.gallery);
             }),
-            if (AppState.userPhotoPath != null) ...[
+            if (AppState.userPhotoBytes != null) ...[
               const SizedBox(height: 10),
               _photoOption(Icons.delete_outline_rounded, 'Eliminar foto',
                   'Volver a mostrar la inicial', () {
                 Navigator.pop(context);
-                setState(() => AppState.userPhotoPath = null);
+                setState(() => AppState.userPhotoBytes = null);
+                FirestoreService.savePhoto(null);
               }, isDestructive: true),
             ],
           ],
@@ -691,10 +692,12 @@ class _ProfileScreenState extends State<ProfileScreen>
         source: source,
         maxWidth: 400,
         maxHeight: 400,
-        imageQuality: 85,
+        imageQuality: 70,
       );
-      if (picked != null && mounted) {
-        setState(() => AppState.userPhotoPath = picked.path);
+      if (picked != null) {
+        final bytes = await picked.readAsBytes();
+        await FirestoreService.savePhoto(base64Encode(bytes));
+        if (mounted) setState(() => AppState.userPhotoBytes = bytes);
       }
     } catch (e) {
       if (mounted) {

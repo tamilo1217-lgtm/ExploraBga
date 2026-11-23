@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../models/place_model.dart';
 import '../services/firestore_service.dart';
@@ -10,7 +12,7 @@ class AppState {
   static String userName  = 'Explorador';
   static String userEmail = 'usuario@correo.com';
   static String userCity      = 'Bucaramanga';
-  static String? userPhotoPath;  // ruta local de la foto de perfil
+  static Uint8List? userPhotoBytes;  // foto de perfil (guardada en Firestore)
 
   // ─ Favoritos ─────────────────────────────────────────
   static final Set<String> favorites = {};
@@ -25,6 +27,16 @@ class AppState {
     }
     // Sincronizar en segundo plano — no bloquea la UI
     FirestoreService.syncFavorites(Set.from(favorites));
+  }
+
+  /// Cargar nombre, ciudad y foto del perfil desde Firestore
+  static Future<void> loadProfile() async {
+    final data = await FirestoreService.getProfile();
+    if (data == null) return;
+    userName = (data['name'] as String?) ?? userName;
+    userCity = (data['city'] as String?) ?? userCity;
+    final b64 = data['photoBase64'] as String?;
+    userPhotoBytes = (b64 != null && b64.isNotEmpty) ? base64Decode(b64) : null;
   }
 
   /// Cargar favoritos desde Firestore al iniciar sesión
@@ -47,7 +59,7 @@ class AppState {
     userName  = 'Explorador';
     userEmail = 'usuario@correo.com';
     userCity      = 'Bucaramanga';
-    userPhotoPath = null;
+    userPhotoBytes = null;
     favorites.clear();
     routesTraced = 0;
   }
