@@ -4,6 +4,7 @@ import '../theme/app_theme.dart';
 import '../config/app_state.dart';
 import 'home_screen.dart';
 import 'places_screen.dart';
+import 'thematic_routes_screen.dart';
 import 'profile_screen.dart';
 
 class MainScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   final List<_NavItem> _items = const [
     _NavItem(Icons.map_rounded,    Icons.map_outlined,    'Explorar'),
     _NavItem(Icons.place_rounded,  Icons.place_outlined,  'Lugares'),
+    _NavItem(Icons.alt_route_rounded, Icons.alt_route_outlined, 'Rutas'),
     _NavItem(Icons.person_rounded, Icons.person_outlined, 'Perfil'),
   ];
 
@@ -35,6 +37,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _loadUserData() async {
+    // Lugares desde Firestore (Sprint 2); no bloquea la carga del perfil
+    AppState.loadPlaces();
     await AppState.loadProfile();
     await AppState.loadFavorites();
     if (mounted) setState(() {});
@@ -61,6 +65,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         children: const [
           HomeScreen(),
           PlacesScreen(),
+          ThematicRoutesScreen(),
           ProfileScreen(),
         ],
       ),
@@ -138,4 +143,4 @@ class _NavItem {
   final IconData icon;
   final String   label;
   const _NavItem(this.activeIcon, this.icon, this.label);
-}
+}

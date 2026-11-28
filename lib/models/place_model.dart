@@ -1,7 +1,16 @@
 /// Lugares reales del área metropolitana de Bucaramanga.
 /// Datos tomados del archivo lugares_explora_bga (coordenadas aportadas por el
-/// autor desde Google Maps y fuentes oficiales). En el Sprint 2 pasarán a Firestore.
+/// autor desde Google Maps y fuentes oficiales).
+///
+/// Sprint 2: la lista [allPlaces] es la "semilla". Al abrir la app se sube a la
+/// colección `places` de Firestore y desde ahí se leen los lugares
+/// (ver FirestoreService.syncPlaces y AppState.loadPlaces).
+/// Si se cambia un dato en esta lista, hay que subir [dataVersion] en 1 para que
+/// la app actualice Firestore.
 class PlaceModel {
+  /// Versión de los datos de [allPlaces]. Subirla en 1 cada vez que se edite la lista.
+  static const int dataVersion = 1;
+
   final String id;
   final String name;
   final String category;
@@ -14,9 +23,11 @@ class PlaceModel {
   final String? hours;     // horario tal como se verificó; null = sin dato
   final String? phone;
   final List<String> tags;
-  /// Calificación promedio: en este Sprint no existen reseñas reales (0.0 = sin
-  /// calificar). Se calculará con las reseñas de los usuarios en el Sprint 2.
+  /// Calificación promedio calculada con las reseñas reales de los usuarios
+  /// (0.0 = sin calificar). Viene de los campos ratingSum / ratingCount de Firestore.
   final double rating;
+  /// Cantidad de reseñas del lugar.
+  final int ratingCount;
 
   const PlaceModel({
     required this.id,
@@ -32,7 +43,60 @@ class PlaceModel {
     this.phone,
     this.tags = const [],
     this.rating = 0.0,
+    this.ratingCount = 0,
   });
+
+  /// Copia del lugar con otra calificación (se usa al guardar una reseña).
+  PlaceModel copyWithRating(double newRating, int newCount) => PlaceModel(
+        id: id, name: name, category: category, categoryIcon: categoryIcon,
+        description: description, lat: lat, lng: lng, priceCop: priceCop,
+        address: address, hours: hours, phone: phone, tags: tags,
+        rating: newRating, ratingCount: newCount,
+      );
+
+  /// Datos que se guardan en Firestore (colección `places`).
+  /// La calificación NO va aquí: la manejan las reseñas (ratingSum / ratingCount).
+  Map<String, dynamic> toMap() => {
+        'name': name,
+        'category': category,
+        'categoryIcon': categoryIcon,
+        'description': description,
+        'lat': lat,
+        'lng': lng,
+        'priceCop': priceCop,
+        'address': address,
+        'hours': hours,
+        'phone': phone,
+        'tags': tags,
+      };
+
+  /// Construye un lugar a partir de un documento de Firestore.
+  factory PlaceModel.fromMap(String id, Map<String, dynamic> m) {
+    final count = (m['ratingCount'] as num?)?.toInt() ?? 0;
+    final sum   = (m['ratingSum'] as num?)?.toDouble() ?? 0;
+    return PlaceModel(
+      id: id,
+      name: m['name'] as String? ?? '',
+      category: m['category'] as String? ?? '',
+      categoryIcon: m['categoryIcon'] as String? ?? '📍',
+      description: m['description'] as String? ?? '',
+      lat: (m['lat'] as num).toDouble(),
+      lng: (m['lng'] as num).toDouble(),
+      priceCop: (m['priceCop'] as num?)?.toInt(),
+      address: m['address'] as String? ?? '',
+      hours: m['hours'] as String?,
+      phone: m['phone'] as String?,
+      tags: (m['tags'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
+      rating: count > 0 ? sum / count : 0.0,
+      ratingCount: count,
+    );
+  }
+
+  /// Texto de la calificación, por ejemplo "4.5 (3 reseñas)"; vacío si no tiene.
+  String get ratingLabel {
+    if (ratingCount == 0) return '';
+    return '${rating.toStringAsFixed(1)} ($ratingCount ${ratingCount == 1 ? 'reseña' : 'reseñas'})';
+  }
 
   /// Rango de precio derivado del valor en COP.
   String get priceRange {

@@ -6,11 +6,13 @@ import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../models/place_model.dart';
+import '../models/thematic_route.dart';
 import '../services/location_service.dart';
 import '../services/route_service.dart';
 import '../theme/app_theme.dart';
 import '../config/app_state.dart';
 import '../services/firestore_service.dart';
+import '../widgets/reviews_sheet.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -18,7 +20,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final MapController _mapCtrl = MapController();
   bool _mapReady = false;
   LatLng? _currentPos;
@@ -26,6 +28,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Marker>   _markers   = [];
   List<Polyline> _polylines = [];
   bool _loadingRoute    = false;
+  int  _routeReq        = 0; // identifica la última solicitud de ruta (evita respuestas desordenadas)
   bool _loadingLocation = true;
   String _priceFilter   = 'Todos';
   double _distFilter    = 50000;
@@ -41,6 +44,23 @@ class _HomeScreenState extends State<HomeScreen> {
   PlaceModel?   _activeRouteDest;
 
 
+  // ─ Seguimiento en vivo (GPS) ─────────────────────────
+  StreamSubscription<Position>? _posSub; // escucha el GPS mientras la app está abierta
+  bool _following = false;      // la cámara sigue al usuario (se activa con el botón de ubicación)
+  List<LatLng> _routePts = [];  // puntos completos de la ruta activa
+  double? _remainingMeters;     // distancia que falta (se recalcula al caminar)
+  bool _arrived = false;        // ya llegó al destino
+  bool _rerouting = false;      // se está recalculando la ruta
+  DateTime _lastReroute = DateTime.fromMillisecondsSinceEpoch(0);
+  static const double _arrivalRadius = 30;  // metros para considerar que llegó
+  static const double _offRouteLimit = 50;  // metros fuera de la ruta para recalcular
+
+  // ─ Paradas (ruta normal = 1 parada; ruta temática = varias, Sprint 1) ─
+  List<PlaceModel> _routeStops = [];
+  int _nextStop = 0;               // índice de la próxima parada por visitar
+  ThematicRoute? _activeThematic;  // ruta temática activa (null = ruta normal)
+  int _progressIdx = 0;            // último punto de la línea de la ruta ya alcanzado
+
   static final LatLng _bucaCenter = LatLng(7.1193, -73.1227);
 
   // Máximo de marcadores visibles a la vez (evita llenar el mapa)
@@ -50,8 +70,11 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initLocation();
     AppState.routeRequest.addListener(_onRouteRequest);
+    AppState.thematicRouteRequest.addListener(_onThematicRequest);
+    AppState.placesVersion.addListener(_onPlacesChanged);
     // Filtro en tiempo real por búsqueda
     _searchCtrl.addListener(() {
       setState(() => _searchQuery = _searchCtrl.text.trim().toLowerCase());
@@ -61,8 +84,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _posSub?.cancel();
     _moveDebounce?.cancel();
     AppState.routeRequest.removeListener(_onRouteRequest);
+    AppState.thematicRouteRequest.removeListener(_onThematicRequest);
+    AppState.placesVersion.removeListener(_onPlacesChanged);
     _searchCtrl.dispose();
     _mapCtrl.dispose();
     super.dispose();
@@ -91,6 +118,147 @@ class _HomeScreenState extends State<HomeScreen> {
         _updateMarkers();
       }
     }
+    // Aunque la primera lectura falle, se queda escuchando el GPS:
+    // en cuanto haya señal el punto azul aparece y se mueve solo.
+    _startTracking();
+  }
+
+  // ── Seguimiento en vivo ──────────────────────────────────
+
+  /// Empieza a escuchar el GPS. Cada vez que el usuario se mueve 3 m o más
+  /// llega una posición nueva a [_onPosition].
+  Future<void> _startTracking() async {
+    await _posSub?.cancel();
+    _posSub = null;
+    // Solo revisa (no vuelve a pedir) el permiso: el diálogo ya se mostró al abrir el mapa
+    if (!await Geolocator.isLocationServiceEnabled()) return;
+    final perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
+    if (!mounted) return;
+    _posSub = LocationService.positionStream().listen(
+      _onPosition,
+      onError: (e) => print('=== GPS error: $e'),
+    );
+  }
+
+  /// Al salir de la app se deja de escuchar el GPS (ahorra batería)
+  /// y al volver se reanuda.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _posSub?.cancel();
+      _posSub = null;
+    } else if (state == AppLifecycleState.resumed && _posSub == null && !_loadingLocation) {
+      _startTracking();
+    }
+  }
+
+  void _onPosition(Position pos) {
+    if (!mounted) return;
+    final p = LatLng(pos.latitude, pos.longitude);
+    setState(() => _currentPos = p);
+    if (_following && _mapReady) _mapCtrl.move(p, _mapCtrl.camera.zoom);
+    if (_activeRouteDest != null && _routePts.isNotEmpty) {
+      _updateRouteProgress(p);
+    } else {
+      _updateMarkers(); // el filtro de distancia depende de la posición
+    }
+  }
+
+  /// Con una ruta activa: marca las paradas alcanzadas, borra el tramo ya
+  /// recorrido, actualiza lo que falta y recalcula la ruta si el usuario se desvía.
+  void _updateRouteProgress(LatLng p) {
+    if (_arrived || _nextStop >= _routeStops.length) return;
+
+    // ¿Llegó a la próxima parada?
+    final next = _routeStops[_nextStop];
+    final toNext = Geolocator.distanceBetween(p.latitude, p.longitude, next.lat, next.lng);
+    if (toNext <= _arrivalRadius) {
+      _nextStop++;
+      final isLast = _nextStop >= _routeStops.length;
+      if (_activeThematic != null) {
+        // En las rutas temáticas cada parada se marca como visitada al llegar
+        FirestoreService.markVisited(placeId: next.id, placeName: next.name, category: next.category);
+      }
+      if (isLast) {
+        setState(() { _arrived = true; _remainingMeters = 0; _polylines = []; });
+        _snack(_activeThematic != null
+            ? '¡Terminaste la ruta ${_activeThematic!.name}!'
+            : '¡Llegaste a ${next.name}!');
+        print('=== ROUTE ARRIVED ${next.name}');
+        _updateMarkers();
+        return;
+      }
+      _snack('Parada $_nextStop de ${_routeStops.length}: ${next.name} ✓');
+      print('=== ROUTE STOP $_nextStop/${_routeStops.length} ${next.name}');
+      _updateMarkers();
+    }
+
+    // Punto de la ruta más cercano al usuario. Se busca solo hacia adelante y en
+    // los siguientes ~400 m, para no "saltar" a un tramo que pasa por la misma calle más adelante.
+    var nearest = _progressIdx;
+    var minDist = double.infinity;
+    var ahead = 0.0;
+    for (var i = _progressIdx; i < _routePts.length; i++) {
+      final d = Geolocator.distanceBetween(
+          p.latitude, p.longitude, _routePts[i].latitude, _routePts[i].longitude);
+      if (d < minDist) { minDist = d; nearest = i; }
+      if (i > _progressIdx) {
+        ahead += Geolocator.distanceBetween(_routePts[i - 1].latitude, _routePts[i - 1].longitude,
+            _routePts[i].latitude, _routePts[i].longitude);
+        if (ahead > 400) break;
+      }
+    }
+
+    // Se salió de la ruta: recalcular hacia las paradas que faltan (máximo una vez cada 15 s)
+    if (minDist > _offRouteLimit) {
+      if (!_rerouting && DateTime.now().difference(_lastReroute).inSeconds >= 15) {
+        _lastReroute = DateTime.now();
+        print('=== ROUTE REROUTE desvío=${minDist.round()} m');
+        _traceStops(_routeStops.sublist(_nextStop), mode: _routeMode, reroute: true);
+      }
+      return;
+    }
+    _progressIdx = nearest;
+
+    // Lo que falta: desde la posición actual hasta el final de la ruta
+    final remaining = <LatLng>[p, ..._routePts.sublist(nearest + 1)];
+    var meters = 0.0;
+    for (var i = 0; i < remaining.length - 1; i++) {
+      meters += Geolocator.distanceBetween(remaining[i].latitude, remaining[i].longitude,
+          remaining[i + 1].latitude, remaining[i + 1].longitude);
+    }
+    setState(() {
+      _polylines = _routePolylines(remaining);
+      _remainingMeters = meters;
+    });
+  }
+
+  /// Ruta morada con borde blanco para que no se confunda con las calles.
+  List<Polyline> _routePolylines(List<LatLng> pts) => [
+        Polyline(points: pts, color: Colors.white, strokeWidth: 12,
+            strokeCap: StrokeCap.round, strokeJoin: StrokeJoin.round),
+        Polyline(points: pts, color: AppTheme.route, strokeWidth: 7,
+            strokeCap: StrokeCap.round, strokeJoin: StrokeJoin.round),
+      ];
+
+  // Escucha cuando la pestaña Rutas pide iniciar una ruta temática (Sprint 1)
+  void _onThematicRequest() {
+    final route = AppState.thematicRouteRequest.value;
+    if (route == null) return;
+    AppState.thematicRouteRequest.value = null;
+    final stops = route.placeIds.map(AppState.placeById).whereType<PlaceModel>().toList();
+    if (stops.isEmpty) return;
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (mounted) _traceStops(stops, mode: route.mode, thematic: route);
+    });
+  }
+
+  // Los lugares se recargaron desde Firestore (o cambió una calificación)
+  void _onPlacesChanged() {
+    if (!mounted) return;
+    _routeStops = _routeStops.map((s) => AppState.placeById(s.id) ?? s).toList();
+    _updateMarkers();
   }
 
   // Escucha cuando PlacesScreen solicita trazar una ruta
@@ -105,7 +273,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   List<PlaceModel> get _filtered {
-    return PlaceModel.allPlaces.where((p) {
+    return AppState.places.where((p) {
       if (_selectedCat != 'Todos' && p.category != _selectedCat) return false;
       if (_priceFilter != 'Todos' && p.priceRange != _priceFilter) return false;
       if (p.rating < _ratingFilter) return false;
@@ -144,13 +312,44 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Parada numerada de una ruta temática (verde con ✓ si ya se visitó).
+  Marker _stopMarker(PlaceModel p, int n, {bool done = false}) {
+    return Marker(
+      point: LatLng(p.lat, p.lng),
+      width: 34,
+      height: 34,
+      child: GestureDetector(
+        onTap: () => _showDetail(p),
+        child: Container(
+          decoration: BoxDecoration(
+            color: done ? AppTheme.success : AppTheme.route,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 3),
+            boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 6)],
+          ),
+          child: Center(
+            child: done
+                ? const Icon(Icons.check_rounded, color: Colors.white, size: 16)
+                : Text('$n', style: GoogleFonts.poppins(
+                    color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13)),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Con una ruta activa solo se muestra el destino. Sin ruta, se muestran
   /// los lugares filtrados que están dentro de la pantalla (máx. _maxMarkers),
   /// los más cercanos al centro; al mover o acercar el mapa se recalculan.
   void _updateMarkers() {
     final dest = _activeRouteDest;
-    if (_polylines.isNotEmpty && dest != null) {
-      setState(() => _markers = [_placeMarker(dest, big: true)]);
+    if (dest != null && _routeStops.isNotEmpty && (_polylines.isNotEmpty || _arrived)) {
+      setState(() => _markers = _activeThematic == null
+          ? [_placeMarker(dest, big: true)]
+          : [
+              for (var i = 0; i < _routeStops.length; i++)
+                _stopMarker(_routeStops[i], i + 1, done: i < _nextStop),
+            ]);
       return;
     }
     var list = _filtered;
@@ -251,68 +450,97 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _traceRoute(PlaceModel dest, {String mode = 'driving'}) async {
-    setState(() { _loadingRoute = true; _polylines.clear(); _lastRouteResult = null; _activeRouteDest = dest; });
+  /// Ruta normal hacia un solo lugar.
+  Future<void> _traceRoute(PlaceModel dest, {String mode = 'driving'}) =>
+      _traceStops([dest], mode: mode);
+
+  /// Traza una ruta desde la ubicación actual pasando por [stops] en orden.
+  /// [thematic] != null cuando es una ruta temática.
+  /// [reroute] = true cuando se recalcula porque el usuario se desvió (o cambió
+  /// de modo en una ruta temática): conserva las paradas visitadas, no borra la
+  /// ruta mientras tanto, no mueve la cámara y no se guarda otra vez.
+  Future<void> _traceStops(List<PlaceModel> stops,
+      {String mode = 'driving', bool reroute = false, ThematicRoute? thematic}) async {
+    if (stops.isEmpty) return;
+    final dest = stops.last;
+    final req = ++_routeReq;
+    if (reroute) {
+      setState(() => _rerouting = true);
+    } else {
+      setState(() {
+        _loadingRoute = true; _polylines = []; _lastRouteResult = null; _activeRouteDest = dest;
+        _routeStops = List.of(stops); _nextStop = 0; _activeThematic = thematic;
+        _routePts = []; _remainingMeters = null; _arrived = false; _progressIdx = 0;
+      });
+    }
     try {
-      // Obtener ubicación fresca
-      try {
-        final pos = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
-        ).timeout(const Duration(seconds: 6));
-        if (mounted) setState(() => _currentPos = LatLng(pos.latitude, pos.longitude));
-      } catch (_) {}
-      if (_currentPos == null) {
-        setState(() => _loadingRoute = false);
+      // Obtener ubicación fresca (al recalcular ya viene del GPS en vivo)
+      if (!reroute) {
+        try {
+          final pos = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.high,
+          ).timeout(const Duration(seconds: 6));
+          if (mounted) setState(() => _currentPos = LatLng(pos.latitude, pos.longitude));
+        } catch (_) {}
+      }
+      if (_currentPos == null || _currentPos == _bucaCenter) {
+        setState(() { _loadingRoute = false; _rerouting = false; });
         _snack('No se pudo obtener tu ubicación', err: true);
         return;
       }
-      final result = await RouteService.getRoutes(
-        _currentPos!.latitude, _currentPos!.longitude, dest.lat, dest.lng,
+      final result = await RouteService.getRouteThrough(
+        [_currentPos!, for (final st in stops) LatLng(st.lat, st.lng)],
         mode: mode,
       );
-      AppState.routesTraced++;
-      FirestoreService.markVisited(placeId: dest.id, placeName: dest.name, category: dest.category);
-      FirestoreService.saveRoute(
-        placeName: dest.name, placeCategory: dest.category,
-        destLat: dest.lat, destLng: dest.lng,
-        distanceKm: double.parse((result.distanceMeters / 1000).toStringAsFixed(2)),
-      );
+      // Si mientras tanto se pidió otra ruta, esta respuesta ya no vale.
+      if (!mounted || req != _routeReq) return;
+      // Si canceló la ruta mientras se recalculaba, no se vuelve a dibujar
+      if (reroute && _activeRouteDest == null) return;
+      print('=== ROUTE CHECK [$mode] origen=${_currentPos!.latitude},${_currentPos!.longitude} '
+          'destino=${dest.name} (${dest.lat},${dest.lng}) paradas=${stops.length} '
+          'linea_recta=${_distanceTo(dest).round()} m '
+          'ruta=${result.distanceMeters.round()} m '
+          'tiempo=${result.durationLabel}');
+      if (!reroute) {
+        AppState.routesTraced++;
+        // En la ruta normal se conserva el comportamiento anterior; en la temática
+        // cada parada se marca como visitada cuando el usuario llega a ella.
+        if (thematic == null) {
+          FirestoreService.markVisited(placeId: dest.id, placeName: dest.name, category: dest.category);
+        }
+        FirestoreService.saveRoute(
+          placeName: thematic?.name ?? dest.name,
+          placeCategory: thematic != null ? 'Ruta temática' : dest.category,
+          destLat: dest.lat, destLng: dest.lng,
+          distanceKm: double.parse((result.distanceMeters / 1000).toStringAsFixed(2)),
+        );
+      }
 
-      // Ruta con borde blanco y color propio (morado) para que no se
-      // confunda con las calles del mapa.
       final mainPts = result.routes[0];
-      final newPolylines = <Polyline>[
-        Polyline(
-          points: mainPts,
-          color: Colors.white,
-          strokeWidth: 12,
-          strokeCap: StrokeCap.round,
-          strokeJoin: StrokeJoin.round,
-        ),
-        Polyline(
-          points: mainPts,
-          color: AppTheme.route,
-          strokeWidth: 7,
-          strokeCap: StrokeCap.round,
-          strokeJoin: StrokeJoin.round,
-        ),
-      ];
-
       setState(() {
-        _polylines = newPolylines;
+        _routePts = mainPts;
+        _polylines = _routePolylines(mainPts);
+        _remainingMeters = result.distanceMeters;
+        _progressIdx = 0;
         _lastRouteResult = result;
         _routeMode = mode;
         _loadingRoute = false;
+        _rerouting = false;
       });
       _updateMarkers(); // con ruta activa solo queda el destino
-      if (mainPts.isNotEmpty && _mapReady) {
+      if (!reroute && mainPts.isNotEmpty && _mapReady) {
+        _following = false;
         _mapCtrl.fitCamera(CameraFit.bounds(
           bounds: LatLngBounds.fromPoints([_currentPos!, ...mainPts]),
           padding: const EdgeInsets.all(80),
         ));
       }
     } catch (e) {
-      if (mounted) { setState(() => _loadingRoute = false); _snack('No se pudo trazar la ruta', err: true); }
+      if (mounted && req == _routeReq) {
+        setState(() { _loadingRoute = false; _rerouting = false; });
+        // Al recalcular no se molesta al usuario: se reintenta en el siguiente movimiento
+        if (!reroute) _snack('No se pudo trazar la ruta', err: true);
+      }
     }
   }
 
@@ -372,12 +600,13 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (_polylines.isNotEmpty) ...[
+                if (_activeRouteDest != null && _lastRouteResult != null) ...[
                   _fab(Icons.close_rounded, AppTheme.error,
                       () => _confirmCancelRoute()),
                   const SizedBox(height: 10),
                 ],
-                _fab(Icons.my_location_rounded, AppTheme.textPrimary, _goToMyLocation),
+                _fab(_following ? Icons.navigation_rounded : Icons.my_location_rounded,
+                    _following ? AppTheme.accent : AppTheme.textPrimary, _goToMyLocation),
                 const SizedBox(height: 10),
                 _fab(Icons.tune_rounded, AppTheme.onAccent, _showFilters, glow: true),
               ],
@@ -449,9 +678,11 @@ class _HomeScreenState extends State<HomeScreen> {
           });
         },
         onPositionChanged: (camera, hasGesture) {
+          // Si el usuario mueve el mapa con el dedo, la cámara deja de seguirlo
+          if (hasGesture && _following) setState(() => _following = false);
           _moveDebounce?.cancel();
           _moveDebounce = Timer(const Duration(milliseconds: 250), () {
-            if (mounted && _polylines.isEmpty) _updateMarkers();
+            if (mounted && _activeRouteDest == null) _updateMarkers();
           });
         },
         interactionOptions: const InteractionOptions(
@@ -661,13 +892,25 @@ class _HomeScreenState extends State<HomeScreen> {
           if (_activeRouteDest != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
-              child: Text(_activeRouteDest!.name,
+              child: Text(
+                  _activeThematic != null
+                      ? '${_activeThematic!.icon} ${_activeThematic!.name}'
+                      : _activeRouteDest!.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.poppins(
                       color: AppTheme.textPrimary,
                       fontSize: 15,
                       fontWeight: FontWeight.w700)),
+            ),
+          if (_activeThematic != null && !_arrived && _nextStop < _routeStops.length)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                  'Parada ${_nextStop + 1} de ${_routeStops.length}: ${_routeStops[_nextStop].name}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 12)),
             ),
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -681,8 +924,15 @@ class _HomeScreenState extends State<HomeScreen> {
                   Text(modeLabel, style: GoogleFonts.poppins(
                     color: AppTheme.accent, fontSize: 11, fontWeight: FontWeight.w600)),
                   Text(
-                    '${_lastRouteResult!.durationLabel}  ·  ${_lastRouteResult!.distanceLabel}',
-                    style: GoogleFonts.poppins(color: AppTheme.textPrimary, fontSize: 13, fontWeight: FontWeight.w700)),
+                    _arrived
+                        ? '¡Llegaste!'
+                        : _rerouting
+                            ? 'Recalculando ruta…'
+                            : '${RouteService.formatDuration(RouteService.estimateSeconds(_remainingMeters ?? _lastRouteResult!.distanceMeters, _routeMode))}'
+                              '  ·  ${RouteService.formatDistance(_remainingMeters ?? _lastRouteResult!.distanceMeters)}',
+                    style: GoogleFonts.poppins(
+                        color: _arrived ? AppTheme.success : AppTheme.textPrimary,
+                        fontSize: 13, fontWeight: FontWeight.w700)),
                 ],
               ),
             ],
@@ -691,8 +941,12 @@ class _HomeScreenState extends State<HomeScreen> {
           // Botón cambiar modo
           GestureDetector(
             onTap: () {
-              if (_activeRouteDest != null) {
-                setState(() => _routeMode = altMode);
+              if (_activeRouteDest == null || _arrived) return;
+              setState(() => _routeMode = altMode);
+              if (_activeThematic != null) {
+                // Ruta temática: se recalcula con el otro modo sin perder las paradas visitadas
+                _traceStops(_routeStops.sublist(_nextStop), mode: altMode, reroute: true);
+              } else {
                 _traceRoute(_activeRouteDest!, mode: altMode);
               }
             },
@@ -725,7 +979,9 @@ class _HomeScreenState extends State<HomeScreen> {
         title: Text('¿Cancelar ruta?',
             style: GoogleFonts.poppins(
                 color: AppTheme.textPrimary, fontSize: 16, fontWeight: FontWeight.w700)),
-        content: Text('Se eliminará la ruta trazada del mapa.',
+        content: Text(_activeThematic != null
+            ? 'Se terminará la ruta temática y se quitará del mapa.'
+            : 'Se eliminará la ruta trazada del mapa.',
             style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 13)),
         actions: [
           TextButton(
@@ -736,10 +992,19 @@ class _HomeScreenState extends State<HomeScreen> {
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
+              _routeReq++; // descarta una ruta que se esté recalculando
               setState(() {
-                _polylines.clear();
+                _polylines = [];
                 _lastRouteResult = null;
                 _activeRouteDest = null;
+                _routePts = [];
+                _remainingMeters = null;
+                _arrived = false;
+                _rerouting = false;
+                _routeStops = [];
+                _nextStop = 0;
+                _activeThematic = null;
+                _progressIdx = 0;
               });
               _updateMarkers();
             },
@@ -788,12 +1053,14 @@ class _HomeScreenState extends State<HomeScreen> {
         desiredAccuracy: LocationAccuracy.high,
       ).timeout(const Duration(seconds: 6));
       final latLng = LatLng(pos.latitude, pos.longitude);
-      if (mounted) setState(() => _currentPos = latLng);
-      if (_mapReady) _mapCtrl.move(latLng, 16);
+      // A partir de aquí la cámara sigue al usuario mientras camina
+      if (mounted) setState(() { _currentPos = latLng; _following = true; });
+      if (_mapReady) _mapCtrl.move(latLng, 17);
     } catch (_) {
       // Si falla, usar la última conocida
-      if (_currentPos != null) {
-        if (_mapReady) _mapCtrl.move(_currentPos!, 16);
+      if (_currentPos != null && _currentPos != _bucaCenter) {
+        setState(() => _following = true);
+        if (_mapReady) _mapCtrl.move(_currentPos!, 17);
       } else {
         _snack('No se pudo obtener tu ubicación', err: true);
       }
@@ -869,11 +1136,21 @@ class _PlaceDetailSheetState extends State<_PlaceDetailSheet> {
             ],
           ),
           const SizedBox(height: 14),
-          Wrap(spacing: 8, children: [
-            _chip(Icons.payments_outlined, widget.place.priceRange, AppTheme.accent),
-            if (widget.distance.isNotEmpty)
-              _chip(Icons.near_me_outlined, widget.distance, AppTheme.textSecondary),
-          ]),
+          // La calificación se lee de AppState para que se actualice al publicar una reseña
+          ValueListenableBuilder<int>(
+            valueListenable: AppState.placesVersion,
+            builder: (_, __, ___) {
+              final current = AppState.placeById(widget.place.id) ?? widget.place;
+              return Wrap(spacing: 8, runSpacing: 6, children: [
+                _chip(Icons.payments_outlined, widget.place.priceRange, AppTheme.accent),
+                if (widget.distance.isNotEmpty)
+                  _chip(Icons.near_me_outlined, widget.distance, AppTheme.textSecondary),
+                _chip(Icons.star_rounded,
+                    current.ratingCount > 0 ? current.ratingLabel : 'Sin reseñas',
+                    AppTheme.accentGold),
+              ]);
+            },
+          ),
           const SizedBox(height: 14),
           Text(widget.place.description, style: GoogleFonts.poppins(
               color: AppTheme.textSecondary, fontSize: 13.5, height: 1.55)),
@@ -882,6 +1159,14 @@ class _PlaceDetailSheetState extends State<_PlaceDetailSheet> {
             const Icon(Icons.location_on_outlined, color: AppTheme.textSecondary, size: 14),
             const SizedBox(width: 6),
             Expanded(child: Text(widget.place.address,
+                style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 12))),
+          ]),
+          const SizedBox(height: 6),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.schedule_rounded, color: AppTheme.textSecondary, size: 14),
+            const SizedBox(width: 6),
+            Expanded(child: Text(
+                widget.place.hours ?? 'Horario por confirmar',
                 style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 12))),
           ]),
           if (widget.place.tags.isNotEmpty) ...[
@@ -900,7 +1185,23 @@ class _PlaceDetailSheetState extends State<_PlaceDetailSheet> {
             ),
           ],
           const SizedBox(height: 20),
-          GestureDetector(
+          Row(children: [
+            // Reseñas (Sprint 2)
+            SizedBox(
+              height: 52,
+              child: OutlinedButton.icon(
+                onPressed: () => showReviewsSheet(context, widget.place),
+                icon: const Icon(Icons.rate_review_outlined, size: 18),
+                label: Text('Reseñas', style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.textPrimary,
+                  side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: GestureDetector(
             onTap: widget.onRoute,
             child: Container(
               width: double.infinity, height: 52,
@@ -916,7 +1217,8 @@ class _PlaceDetailSheetState extends State<_PlaceDetailSheet> {
                   color: Colors.white, fontWeight: FontWeight.w600, fontSize: 15)),
               ]),
             ),
-          ),
+          )),
+          ]),
         ],
       ),
     );
@@ -1033,4 +1335,4 @@ class _FilterSheetState extends State<_FilterSheet> {
       child: Slider(value: val, min: min, max: max, divisions: div, onChanged: cb),
     );
   }
-}
+}

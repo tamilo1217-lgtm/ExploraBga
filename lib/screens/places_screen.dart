@@ -7,6 +7,7 @@ import '../services/location_service.dart';
 import '../theme/app_theme.dart';
 import '../config/app_state.dart';
 import '../services/firestore_service.dart';
+import '../widgets/reviews_sheet.dart';
 
 class PlacesScreen extends StatefulWidget {
   const PlacesScreen({Key? key}) : super(key: key);
@@ -31,6 +32,18 @@ class _PlacesScreenState extends State<PlacesScreen>
   void initState() {
     super.initState();
     _loadLocation();
+    // Se redibuja cuando los lugares llegan de Firestore o cambia una calificación
+    AppState.placesVersion.addListener(_onPlacesChanged);
+  }
+
+  @override
+  void dispose() {
+    AppState.placesVersion.removeListener(_onPlacesChanged);
+    super.dispose();
+  }
+
+  void _onPlacesChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadLocation() async {
@@ -41,7 +54,7 @@ class _PlacesScreenState extends State<PlacesScreen>
   }
 
   List<PlaceModel> get _filtered {
-    var list = PlaceModel.allPlaces.where((p) {
+    var list = AppState.places.where((p) {
       if (_cat != 'Todos' && p.category != _cat) return false;
       if (_priceFilter != 'Todos' && p.priceRange != _priceFilter) return false;
       if (p.rating < _ratingFilter) return false;
@@ -296,6 +309,12 @@ class _PlacesScreenState extends State<PlacesScreen>
                               style: GoogleFonts.poppins(
                                   color: AppTheme.textSecondary, fontSize: 11)),
                         ],
+                        if (p.ratingCount > 0) ...[
+                          const SizedBox(width: 8),
+                          Text('⭐ ${p.rating.toStringAsFixed(1)}',
+                              style: GoogleFonts.poppins(
+                                  color: AppTheme.accentGold, fontSize: 11, fontWeight: FontWeight.w600)),
+                        ],
                       ]),
                     ],
                   ),
@@ -432,6 +451,13 @@ class _QuickDetailSheetState extends State<_QuickDetailSheet> {
             Expanded(child: Text(widget.place.address,
                 style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 12))),
           ]),
+          const SizedBox(height: 6),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.schedule_rounded, color: AppTheme.textSecondary, size: 14),
+            const SizedBox(width: 6),
+            Expanded(child: Text(widget.place.hours ?? 'Horario por confirmar',
+                style: GoogleFonts.poppins(color: AppTheme.textSecondary, fontSize: 12))),
+          ]),
           const SizedBox(height: 16),
           Container(
             padding: const EdgeInsets.all(14),
@@ -445,11 +471,39 @@ class _QuickDetailSheetState extends State<_QuickDetailSheet> {
                 _stat(Icons.payments_outlined, widget.place.priceRange, 'Precio', AppTheme.accent),
                 _divider(),
                 _stat(Icons.near_me_outlined, widget.distance.isEmpty ? '—' : widget.distance, 'Distancia', AppTheme.textSecondary),
+                _divider(),
+                // Calificación real (se actualiza al publicar una reseña)
+                ValueListenableBuilder<int>(
+                  valueListenable: AppState.placesVersion,
+                  builder: (_, __, ___) {
+                    final current = AppState.placeById(widget.place.id) ?? widget.place;
+                    return _stat(Icons.star_rounded,
+                        current.ratingCount > 0 ? current.rating.toStringAsFixed(1) : '—',
+                        current.ratingCount > 0 ? '${current.ratingCount} reseñas' : 'Sin reseñas',
+                        AppTheme.accentGold);
+                  },
+                ),
               ],
             ),
           ),
           const SizedBox(height: 20),
-          GestureDetector(
+          Row(children: [
+            // Reseñas (Sprint 2)
+            SizedBox(
+              height: 54,
+              child: OutlinedButton.icon(
+                onPressed: () => showReviewsSheet(context, widget.place),
+                icon: const Icon(Icons.rate_review_outlined, size: 18),
+                label: Text('Reseñas', style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.textPrimary,
+                  side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(27)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: GestureDetector(
             onTap: () {
               Navigator.pop(context);
               AppState.requestRoute(widget.place);
@@ -476,7 +530,8 @@ class _QuickDetailSheetState extends State<_QuickDetailSheet> {
                 ],
               ),
             ),
-          ),
+          )),
+          ]),
         ],
       ),
     );
@@ -614,4 +669,4 @@ class _PlacesFilterSheetState extends State<_PlacesFilterSheet> {
       child: Slider(value: val, min: min, max: max, divisions: div, onChanged: cb),
     );
   }
-}
+}

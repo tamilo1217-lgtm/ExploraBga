@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'auth_service.dart';
+import '../models/place_model.dart';
+import '../models/thematic_route.dart';
 
 class FirestoreService {
   static final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -176,4 +178,149 @@ class FirestoreService {
       return [];
     }
   }
-}
+
+  // ══════════════════════════════════════════════════════
+  // LUGARES (Sprint 2): colección `places`
+  // ══════════════════════════════════════════════════════
+
+  /// Sube los lugares de PlaceModel.allPlaces a Firestore si la versión guardada
+  /// en `meta/places` es menor que PlaceModel.dataVersion (o si no existe).
+  /// Se usa merge para NO borrar ratingSum / ratingCount de las reseñas.
+  static Future<void> syncPlaces() async {
+    final meta = _db.collection('meta').doc('places');
+    final snap = await meta.get();
+    final remote = (snap.data()?['version'] as num?)?.toInt() ?? 0;
+    if (remote >= PlaceModel.dataVersion) return;
+
+    final batch = _db.batch();
+    for (final p in PlaceModel.allPlaces) {
+      batch.set(_db.collection('places').doc(p.id), p.toMap(), SetOptions(merge: true));
+    }
+    batch.set(meta, {
+      'version': PlaceModel.dataVersion,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    print('=== FIRESTORE lugares subidos: ${PlaceModel.allPlaces.length} (versión ${PlaceModel.dataVersion})');
+  }
+
+  /// Lee todos los lugares de Firestore (con su calificación real).
+  static Future<List<PlaceModel>> getPlaces() async {
+    final snap = await _db.collection('places').get();
+    final list = snap.docs.map((d) => PlaceModel.fromMap(d.id, d.data())).toList()
+      ..sort((a, b) => a.id.compareTo(b.id));
+    return list;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // RUTAS TEMÁTICAS (Sprint 1): colección `thematicRoutes`
+  // ══════════════════════════════════════════════════════
+
+  /// Sube ThematicRoute.defaults si la versión de `meta/thematicRoutes` es menor.
+  static Future<void> syncThematicRoutes() async {
+    final meta = _db.collection('meta').doc('thematicRoutes');
+    final snap = await meta.get();
+    final remote = (snap.data()?['version'] as num?)?.toInt() ?? 0;
+    if (remote >= ThematicRoute.dataVersion) return;
+
+    final batch = _db.batch();
+    for (final r in ThematicRoute.defaults) {
+      batch.set(_db.collection('thematicRoutes').doc(r.id), r.toMap());
+    }
+    batch.set(meta, {
+      'version': ThematicRoute.dataVersion,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    print('=== FIRESTORE rutas temáticas subidas: ${ThematicRoute.defaults.length}');
+  }
+
+  /// Lee las rutas temáticas ordenadas. Si falla (sin internet), usa las del código.
+  static Future<List<ThematicRoute>> getThematicRoutes() async {
+    try {
+      await syncThematicRoutes();
+      final snap = await _db.collection('thematicRoutes').orderBy('order').get();
+      final list = snap.docs.map((d) => ThematicRoute.fromMap(d.id, d.data())).toList();
+      return list.isEmpty ? ThematicRoute.defaults : list;
+    } catch (e) {
+      print('=== FIRESTORE rutas temáticas no disponibles ($e), se usan las locales');
+      return ThematicRoute.defaults;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════
+  // RESEÑAS (Sprint 2): places/{placeId}/reviews/{uid}
+  // Una reseña por usuario y lugar (el id del documento es el uid).
+  // El lugar guarda ratingSum y ratingCount para calcular el promedio.
+  // ══════════════════════════════════════════════════════
+
+  static CollectionReference<Map<String, dynamic>> _reviews(String placeId) =>
+      _db.collection('places').doc(placeId).collection('reviews');
+
+  /// Reseñas de un lugar en tiempo real, de la más reciente a la más antigua.
+  static Stream<List<Map<String, dynamic>>> reviewsStream(String placeId) {
+    return _reviews(placeId)
+        .orderBy('updatedAt', descending: true)
+        .snapshots()
+        .map((snap) => snap.docs.map((d) => {...d.data(), 'id': d.id}).toList());
+  }
+
+  /// Guarda (o reemplaza) la reseña del usuario y actualiza el promedio del lugar
+  /// en una transacción, para que la suma y el conteo nunca queden desfasados.
+  static Future<void> saveReview({
+    required String placeId,
+    required int rating,
+    required String comment,
+    required String userName,
+  }) async {
+    final uid = AuthService.currentUserId;
+    if (uid == null) throw Exception('Sin sesión');
+    final reviewRef = _reviews(placeId).doc(uid);
+    final placeRef  = _db.collection('places').doc(placeId);
+
+    await _db.runTransaction((tx) async {
+      final old = await tx.get(reviewRef);
+      final oldRating = (old.data()?['rating'] as num?)?.toInt();
+
+      tx.set(reviewRef, {
+        'userId':    uid,
+        'userName':  userName,
+        'rating':    rating,
+        'comment':   comment,
+        'createdAt': old.exists ? old.data()!['createdAt'] : FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      tx.set(placeRef, {
+        'ratingSum':   FieldValue.increment(rating - (oldRating ?? 0)),
+        'ratingCount': FieldValue.increment(oldRating == null ? 1 : 0),
+      }, SetOptions(merge: true));
+    });
+  }
+
+  /// Elimina la reseña del usuario y la descuenta del promedio.
+  static Future<void> deleteReview(String placeId) async {
+    final uid = AuthService.currentUserId;
+    if (uid == null) return;
+    final reviewRef = _reviews(placeId).doc(uid);
+    final placeRef  = _db.collection('places').doc(placeId);
+
+    await _db.runTransaction((tx) async {
+      final old = await tx.get(reviewRef);
+      if (!old.exists) return;
+      final oldRating = (old.data()?['rating'] as num?)?.toInt() ?? 0;
+      tx.delete(reviewRef);
+      tx.set(placeRef, {
+        'ratingSum':   FieldValue.increment(-oldRating),
+        'ratingCount': FieldValue.increment(-1),
+      }, SetOptions(merge: true));
+    });
+  }
+
+  /// Lee el promedio actual de un lugar: (promedio, cantidad).
+  static Future<(double, int)> getPlaceRating(String placeId) async {
+    final doc = await _db.collection('places').doc(placeId).get();
+    final count = (doc.data()?['ratingCount'] as num?)?.toInt() ?? 0;
+    final sum   = (doc.data()?['ratingSum'] as num?)?.toDouble() ?? 0;
+    return (count > 0 ? sum / count : 0.0, count);
+  }
+}

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../models/place_model.dart';
+import '../models/thematic_route.dart';
 import '../services/firestore_service.dart';
 
 /// Estado global simple de la app
@@ -64,6 +65,54 @@ class AppState {
     routesTraced = 0;
   }
 
+  // ─ Lugares (Sprint 2: vienen de Firestore) ───────────
+  /// Lista de lugares que usan todas las pantallas. Arranca con la lista local
+  /// para que el mapa no espere, y se reemplaza por la de Firestore al cargar.
+  static List<PlaceModel> places = List.of(PlaceModel.allPlaces);
+
+  /// Cambia cada vez que se actualizan los lugares (las pantallas lo escuchan).
+  static final ValueNotifier<int> placesVersion = ValueNotifier(0);
+
+  /// Sube la semilla si hace falta y luego lee los lugares de Firestore.
+  /// Si no hay internet, se quedan los locales.
+  static Future<void> loadPlaces() async {
+    try {
+      await FirestoreService.syncPlaces();
+      final remote = await FirestoreService.getPlaces();
+      if (remote.isNotEmpty) {
+        places = remote;
+        placesVersion.value++;
+      }
+    } catch (e) {
+      print('=== FIRESTORE lugares no disponibles ($e), se usan los locales');
+    }
+  }
+
+  static PlaceModel? placeById(String id) {
+    for (final p in places) {
+      if (p.id == id) return p;
+    }
+    return null;
+  }
+
+  /// Vuelve a leer el promedio de un lugar después de guardar o borrar una reseña.
+  static Future<void> refreshPlaceRating(String placeId) async {
+    final (avg, count) = await FirestoreService.getPlaceRating(placeId);
+    final i = places.indexWhere((p) => p.id == placeId);
+    if (i >= 0) {
+      places[i] = places[i].copyWithRating(avg, count);
+      placesVersion.value++;
+    }
+  }
+
+  // ─ Rutas temáticas entre tabs (Sprint 1) ─────────────
+  static final ValueNotifier<ThematicRoute?> thematicRouteRequest = ValueNotifier(null);
+
+  static void requestThematicRoute(ThematicRoute route) {
+    thematicRouteRequest.value = route;
+    _switchToMap?.call();
+  }
+
   // ─ Sistema de rutas entre tabs ───────────────────────
   static final ValueNotifier<PlaceModel?> routeRequest = ValueNotifier(null);
   static void Function()? _switchToMap;
@@ -76,4 +125,4 @@ class AppState {
     routeRequest.value = place;
     _switchToMap?.call();
   }
-}
+}

@@ -523,7 +523,7 @@ class _ProfileScreenState extends State<ProfileScreen>
   // ── Actions ────────────────────────────────────────────
   String _topCategory() {
     if (AppState.favorites.isEmpty) return 'Sin explorar aún';
-    final favPlaces = PlaceModel.allPlaces
+    final favPlaces = AppState.places
         .where((p) => AppState.isFavorite(p.id))
         .toList();
     final freq = <String, int>{};
@@ -554,7 +554,7 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   void _showFavorites() {
-    final favs = PlaceModel.allPlaces
+    final favs = AppState.places
         .where((p) => AppState.isFavorite(p.id))
         .toList();
     showModalBottomSheet(
@@ -1268,4 +1268,4 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       decoration: InputDecoration(labelText: label, prefixIcon: Icon(icon, size: 19)),
     );
   }
-}
+}
